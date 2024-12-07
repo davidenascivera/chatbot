@@ -1,9 +1,9 @@
 import streamlit as st
-from transformers import TextStreamer
-from unsloth import FastLanguageModel
 import torch
+import os
 
-# Ensure we're using CPU
+# Force CPU usage
+os.environ['CUDA_VISIBLE_DEVICES'] = ''
 torch.set_default_device('cpu')
 
 # Show title and description
@@ -13,19 +13,26 @@ st.write(
     "The model runs entirely on your CPU - no GPU required!"
 )
 
-class StreamlitTextStreamer(TextStreamer):
-    def __init__(self, tokenizer, container, skip_prompt=True):
-        super().__init__(tokenizer=tokenizer, skip_prompt=skip_prompt)
+# Custom streamer for Streamlit
+class SimpleStreamlitStreamer:
+    def __init__(self, tokenizer, container):
+        self.tokenizer = tokenizer
         self.container = container
         self.text = ""
         
-    def put(self, text):
+    def put(self, token_ids):
+        text = self.tokenizer.decode(token_ids, skip_special_tokens=True)
         self.text += text
         self.container.markdown(self.text)
+        
+    def end(self):
+        pass
 
 # Load the model (only once)
 @st.cache_resource
 def load_model():
+    from unsloth import FastLanguageModel
+    
     max_seq_length = 2048
     model_name_or_path = "davnas/Italian_Cousine_1.2"
     
@@ -35,13 +42,11 @@ def load_model():
         max_seq_length=max_seq_length,
         dtype=torch.float32,  # Use float32 for CPU
         load_in_4bit=False,   # Disable 4-bit quantization for CPU
+        device_map='cpu'      # Explicitly set device map to CPU
     )
     
     # Enable inference optimizations
     FastLanguageModel.for_inference(model)
-    
-    # Ensure model is on CPU
-    model = model.to('cpu')
     return model, tokenizer
 
 # Load model with a loading indicator
@@ -84,26 +89,36 @@ if prompt := st.chat_input("Ask me about cooking..."):
             tokenize=True,
             add_generation_prompt=True,
             return_tensors="pt",
-        ).to('cpu')  # Ensure inputs are on CPU
+        )
 
         # Generate response with streaming
         with st.chat_message("assistant"):
             response_container = st.empty()
-            streamer = StreamlitTextStreamer(
+            streamer = SimpleStreamlitStreamer(
                 tokenizer=tokenizer,
                 container=response_container
             )
             
             # Add a progress indicator for CPU generation
             with st.spinner("Generating response... (CPU processing)"):
-                model.generate(
+                output_ids = []
+                
+                # Manual streaming implementation
+                for token_ids in model.generate(
                     input_ids=inputs,
-                    streamer=streamer,
                     max_new_tokens=128,
                     use_cache=True,
-                    temperature=1.2,     # Slightly reduced for CPU
+                    temperature=1.2,
                     min_p=0.1,
-                )
+                    do_sample=True,
+                    pad_token_id=tokenizer.pad_token_id,
+                    eos_token_id=tokenizer.eos_token_id,
+                    return_dict_in_generate=True,
+                    output_scores=False,
+                ):
+                    output_ids.append(token_ids[-1].unsqueeze(0))
+                    if len(output_ids) > 1:  # Skip first token which might be a special token
+                        streamer.put(output_ids[-1])
             
             # Store the response
             st.session_state.messages.append({
