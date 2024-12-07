@@ -1,12 +1,16 @@
 import streamlit as st
 from transformers import TextStreamer
 from unsloth import FastLanguageModel
+import torch
+
+# Ensure we're using CPU
+torch.set_default_device('cpu')
 
 # Show title and description
-st.title("👩‍🍳 Local Cooking Assistant")
+st.title("👩‍🍳 Local Cooking Assistant (CPU)")
 st.write(
     "This is a chatbot that uses a local fine-tuned model specialized in cooking and recipes. "
-    "The model runs entirely on your machine - no API key needed!"
+    "The model runs entirely on your CPU - no GPU required!"
 )
 
 class StreamlitTextStreamer(TextStreamer):
@@ -23,23 +27,28 @@ class StreamlitTextStreamer(TextStreamer):
 @st.cache_resource
 def load_model():
     max_seq_length = 2048
-    dtype = None
     model_name_or_path = "davnas/Italian_Cousine_1.2"
     
+    # CPU-specific loading configuration
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=model_name_or_path,
         max_seq_length=max_seq_length,
-        dtype=dtype,
-        load_in_4bit=True,
+        dtype=torch.float32,  # Use float32 for CPU
+        load_in_4bit=False,   # Disable 4-bit quantization for CPU
     )
+    
+    # Enable inference optimizations
     FastLanguageModel.for_inference(model)
+    
+    # Ensure model is on CPU
+    model = model.to('cpu')
     return model, tokenizer
 
 # Load model with a loading indicator
-with st.spinner("Loading model... Please wait..."):
+with st.spinner("Loading model... Please wait... (This might take a while on CPU)"):
     try:
         model, tokenizer = load_model()
-        st.success("Model loaded successfully!")
+        st.success("Model loaded successfully on CPU!")
     except Exception as e:
         st.error(f"Error loading model: {str(e)}")
         st.stop()
@@ -52,6 +61,9 @@ if "messages" not in st.session_state:
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
+
+# Add a warning about CPU performance
+st.sidebar.warning("Running on CPU - responses might be slower")
 
 # Chat input
 if prompt := st.chat_input("Ask me about cooking..."):
@@ -72,7 +84,7 @@ if prompt := st.chat_input("Ask me about cooking..."):
             tokenize=True,
             add_generation_prompt=True,
             return_tensors="pt",
-        )
+        ).to('cpu')  # Ensure inputs are on CPU
 
         # Generate response with streaming
         with st.chat_message("assistant"):
@@ -82,14 +94,16 @@ if prompt := st.chat_input("Ask me about cooking..."):
                 container=response_container
             )
             
-            model.generate(
-                input_ids=inputs,
-                streamer=streamer,
-                max_new_tokens=128,
-                use_cache=True,
-                temperature=1.5,
-                min_p=0.1,
-            )
+            # Add a progress indicator for CPU generation
+            with st.spinner("Generating response... (CPU processing)"):
+                model.generate(
+                    input_ids=inputs,
+                    streamer=streamer,
+                    max_new_tokens=128,
+                    use_cache=True,
+                    temperature=1.2,     # Slightly reduced for CPU
+                    min_p=0.1,
+                )
             
             # Store the response
             st.session_state.messages.append({
@@ -104,3 +118,11 @@ if prompt := st.chat_input("Ask me about cooking..."):
 if st.sidebar.button("Clear Chat History"):
     st.session_state.messages = []
     st.experimental_rerun()
+
+# Add CPU-specific settings to sidebar
+st.sidebar.subheader("CPU Settings")
+st.sidebar.markdown("""
+- Using float32 precision
+- 4-bit quantization disabled
+- Cache enabled for better performance
+""")
