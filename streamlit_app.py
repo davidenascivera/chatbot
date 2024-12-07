@@ -1,8 +1,9 @@
 import streamlit as st
 import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
 import os
 
-# Force CPU usage
+# Ensure we're only using CPU
 os.environ['CUDA_VISIBLE_DEVICES'] = ''
 torch.set_default_device('cpu')
 
@@ -31,22 +32,17 @@ class SimpleStreamlitStreamer:
 # Load the model (only once)
 @st.cache_resource
 def load_model():
-    from unsloth import FastLanguageModel
-    
-    max_seq_length = 2048
     model_name_or_path = "davnas/Italian_Cousine_1.2"
     
     # CPU-specific loading configuration
-    model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name=model_name_or_path,
-        max_seq_length=max_seq_length,
-        dtype=torch.float32,  # Use float32 for CPU
-        load_in_4bit=False,   # Disable 4-bit quantization for CPU
-        device_map='cpu'      # Explicitly set device map to CPU
+    tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name_or_path,
+        torch_dtype=torch.float32,  # Use float32 for CPU
+        device_map="cpu",
+        low_cpu_mem_usage=True
     )
     
-    # Enable inference optimizations
-    FastLanguageModel.for_inference(model)
     return model, tokenizer
 
 # Load model with a loading indicator
@@ -106,15 +102,15 @@ if prompt := st.chat_input("Ask me about cooking..."):
                 # Manual streaming implementation
                 for token_ids in model.generate(
                     input_ids=inputs,
-                    max_new_tokens=128,
-                    use_cache=True,
-                    temperature=1.2,
-                    min_p=0.1,
+                    max_length=256,
                     do_sample=True,
+                    temperature=1.2,
+                    top_p=0.95,
+                    num_return_sequences=1,
                     pad_token_id=tokenizer.pad_token_id,
                     eos_token_id=tokenizer.eos_token_id,
-                    return_dict_in_generate=True,
                     output_scores=False,
+                    return_dict_in_generate=True,
                 ):
                     output_ids.append(token_ids[-1].unsqueeze(0))
                     if len(output_ids) > 1:  # Skip first token which might be a special token
@@ -135,9 +131,9 @@ if st.sidebar.button("Clear Chat History"):
     st.experimental_rerun()
 
 # Add CPU-specific settings to sidebar
-st.sidebar.subheader("CPU Settings")
+st.sidebar.subheader("Settings")
 st.sidebar.markdown("""
+- Running on CPU only
 - Using float32 precision
-- 4-bit quantization disabled
-- Cache enabled for better performance
+- Low memory usage enabled
 """)
