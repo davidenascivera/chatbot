@@ -1,56 +1,106 @@
 import streamlit as st
-from openai import OpenAI
+from transformers import TextStreamer
+from unsloth import FastLanguageModel
 
-# Show title and description.
-st.title("💬 Chatbot")
+# Show title and description
+st.title("👩‍🍳 Local Cooking Assistant")
 st.write(
-    "This is a simple chatbot that uses OpenAI's GPT-3.5 model to generate responses. "
-    "To use this app, you need to provide an OpenAI API key, which you can get [here](https://platform.openai.com/account/api-keys). "
-    "You can also learn how to build this app step by step by [following our tutorial](https://docs.streamlit.io/develop/tutorials/llms/build-conversational-apps)."
+    "This is a chatbot that uses a local fine-tuned model specialized in cooking and recipes. "
+    "The model runs entirely on your machine - no API key needed!"
 )
 
-# Ask user for their OpenAI API key via `st.text_input`.
-# Alternatively, you can store the API key in `./.streamlit/secrets.toml` and access it
-# via `st.secrets`, see https://docs.streamlit.io/develop/concepts/connections/secrets-management
-openai_api_key = st.text_input("OpenAI API Key", type="password")
-if not openai_api_key:
-    st.info("Please add your OpenAI API key to continue.", icon="🗝️")
-else:
+class StreamlitTextStreamer(TextStreamer):
+    def __init__(self, tokenizer, container, skip_prompt=True):
+        super().__init__(tokenizer=tokenizer, skip_prompt=skip_prompt)
+        self.container = container
+        self.text = ""
+        
+    def put(self, text):
+        self.text += text
+        self.container.markdown(self.text)
 
-    # Create an OpenAI client.
-    client = OpenAI(api_key=openai_api_key)
+# Load the model (only once)
+@st.cache_resource
+def load_model():
+    max_seq_length = 2048
+    dtype = None
+    model_name_or_path = "davnas/Italian_Cousine_1.2"
+    
+    model, tokenizer = FastLanguageModel.from_pretrained(
+        model_name=model_name_or_path,
+        max_seq_length=max_seq_length,
+        dtype=dtype,
+        load_in_4bit=True,
+    )
+    FastLanguageModel.for_inference(model)
+    return model, tokenizer
 
-    # Create a session state variable to store the chat messages. This ensures that the
-    # messages persist across reruns.
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
+# Load model with a loading indicator
+with st.spinner("Loading model... Please wait..."):
+    try:
+        model, tokenizer = load_model()
+        st.success("Model loaded successfully!")
+    except Exception as e:
+        st.error(f"Error loading model: {str(e)}")
+        st.stop()
 
-    # Display the existing chat messages via `st.chat_message`.
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+# Initialize chat history
+if "messages" not in st.session_state:
+    st.session_state.messages = []
 
-    # Create a chat input field to allow the user to enter a message. This will display
-    # automatically at the bottom of the page.
-    if prompt := st.chat_input("What is up?"):
+# Display existing messages
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
 
-        # Store and display the current prompt.
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
+# Chat input
+if prompt := st.chat_input("Ask me about cooking..."):
+    # Store and display user message
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+        st.markdown(prompt)
 
-        # Generate a response using the OpenAI API.
-        stream = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": m["role"], "content": m["content"]}
-                for m in st.session_state.messages
-            ],
-            stream=True,
+    try:
+        # Prepare model input
+        messages = [
+            {"role": m["role"], "content": m["content"]}
+            for m in st.session_state.messages
+        ]
+        
+        inputs = tokenizer.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=True,
+            return_tensors="pt",
         )
 
-        # Stream the response to the chat using `st.write_stream`, then store it in 
-        # session state.
+        # Generate response with streaming
         with st.chat_message("assistant"):
-            response = st.write_stream(stream)
-        st.session_state.messages.append({"role": "assistant", "content": response})
+            response_container = st.empty()
+            streamer = StreamlitTextStreamer(
+                tokenizer=tokenizer,
+                container=response_container
+            )
+            
+            model.generate(
+                input_ids=inputs,
+                streamer=streamer,
+                max_new_tokens=128,
+                use_cache=True,
+                temperature=1.5,
+                min_p=0.1,
+            )
+            
+            # Store the response
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": streamer.text
+            })
+            
+    except Exception as e:
+        st.error(f"Error generating response: {str(e)}")
+
+# Add a button to clear chat history
+if st.sidebar.button("Clear Chat History"):
+    st.session_state.messages = []
+    st.experimental_rerun()
